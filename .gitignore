@@ -1,0 +1,23 @@
+# Dependencias
+node_modules/
+
+# Compilado
+build/
+
+# Archivos temporales generados por el servidor
+*.gbsproj.bak
+*.gbsproj.tmp
+
+# Variables de entorno
+.env
+.env.*
+
+# Logs
+*.log
+
+# macOS
+.DS_Store
+
+# Editores
+.vscode/settings.json
+.idea/

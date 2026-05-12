@@ -1,0 +1,153 @@
+{
+  "_version": "4.2.0",
+  "_release": "1",
+  "name": "Mi Aventura GB",
+  "author": "Desarrollador",
+  "notes": "Proyecto de prueba para el MCP server",
+  "scenes": [
+    {
+      "id": "scene-001",
+      "name": "Intro",
+      "type": "topDown",
+      "backgroundId": "bg-001",
+      "width": 20,
+      "height": 18,
+      "actors": [
+        {
+          "id": "actor-001",
+          "name": "Héroe",
+          "x": 5,
+          "y": 8,
+          "spriteSheetId": "sprite-001",
+          "movementType": "playerInput",
+          "direction": "down",
+          "animate": true,
+          "symbol": "actor_hero",
+          "script": [
+            {
+              "id": "evt-001",
+              "command": "EVENT_TEXT",
+              "args": { "text": ["¡Bienvenido!"] }
+            }
+          ],
+          "startScript": [],
+          "updateScript": [],
+          "hit1Script": [],
+          "hit2Script": [],
+          "hit3Script": []
+        },
+        {
+          "id": "actor-002",
+          "name": "NPC Aldeano",
+          "x": 12,
+          "y": 6,
+          "spriteSheetId": "sprite-002",
+          "movementType": "random",
+          "direction": "right",
+          "animate": false,
+          "symbol": "actor_npc_aldeano",
+          "script": [
+            {
+              "id": "evt-002",
+              "command": "EVENT_TEXT",
+              "args": { "text": ["Hola viajero, ¿a dónde vas?"] }
+            }
+          ],
+          "startScript": [],
+          "updateScript": [],
+          "hit1Script": [],
+          "hit2Script": [],
+          "hit3Script": []
+        }
+      ],
+      "triggers": [
+        {
+          "id": "trigger-001",
+          "name": "Salida Norte",
+          "x": 9,
+          "y": 0,
+          "width": 2,
+          "height": 1,
+          "symbol": "trigger_salida_norte",
+          "script": [
+            {
+              "id": "evt-003",
+              "command": "EVENT_SWITCH_SCENE",
+              "args": {
+                "sceneId": "scene-002",
+                "x": 9,
+                "y": 17,
+                "direction": "down"
+              }
+            }
+          ]
+        }
+      ],
+      "script": [],
+      "collisions": [],
+      "symbol": "scene_intro",
+      "notes": "Escena inicial del juego"
+    },
+    {
+      "id": "scene-002",
+      "name": "Bosque",
+      "type": "topDown",
+      "backgroundId": "bg-002",
+      "width": 32,
+      "height": 32,
+      "actors": [
+        {
+          "id": "actor-003",
+          "name": "Enemigo Slime",
+          "x": 15,
+          "y": 10,
+          "spriteSheetId": "sprite-003",
+          "movementType": "random",
+          "direction": "down",
+          "animate": true,
+          "symbol": "actor_slime",
+          "script": [],
+          "startScript": [],
+          "updateScript": [],
+          "hit1Script": [],
+          "hit2Script": [],
+          "hit3Script": []
+        }
+      ],
+      "triggers": [],
+      "script": [],
+      "collisions": [],
+      "symbol": "scene_bosque",
+      "notes": null
+    }
+  ],
+  "variables": [
+    { "id": "0", "name": "score", "symbol": "var_score" },
+    { "id": "1", "name": "vida", "symbol": "var_vida" },
+    { "id": "2", "name": "monedas", "symbol": "var_monedas" }
+  ],
+  "customEvents": [],
+  "spriteSheets": [
+    { "id": "sprite-001", "name": "Héroe", "filename": "hero.png", "type": "actor_animated", "symbol": "sprite_hero" },
+    { "id": "sprite-002", "name": "Aldeano", "filename": "npc.png", "type": "actor", "symbol": "sprite_aldeano" },
+    { "id": "sprite-003", "name": "Slime", "filename": "slime.png", "type": "actor_animated", "symbol": "sprite_slime" }
+  ],
+  "backgrounds": [
+    { "id": "bg-001", "name": "Pueblo", "filename": "pueblo.png", "width": 20, "height": 18, "imageWidth": 160, "imageHeight": 144, "symbol": "bg_pueblo" },
+    { "id": "bg-002", "name": "Bosque", "filename": "bosque.png", "width": 32, "height": 32, "imageWidth": 256, "imageHeight": 256, "symbol": "bg_bosque" }
+  ],
+  "music": [
+    { "id": "music-001", "name": "Tema Principal", "filename": "main_theme.uge", "type": "uge", "symbol": "music_main_theme" }
+  ],
+  "sounds": [],
+  "fonts": [],
+  "settings": {
+    "startSceneId": "scene-001",
+    "playerSpriteSheetId": "sprite-001",
+    "colorMode": "mono",
+    "musicDriver": "huge",
+    "cartType": "MBC5",
+    "sgbEnabled": false,
+    "customColorsEnabled": false
+  }
+}
