@@ -1,4 +1,45 @@
 import type { GBSProject, GBSScene, GBSActor, GBSTrigger, GBSEvent, GBSSlottable } from "../types/gbstudio.js";
+import { loadProject, saveProject } from "./gbsproj-parser.js";
+
+// --- Constantes de slots de script por tipo de entidad ---
+// Fuente única — usadas en walkProjectEvents, validateProject y los tools de scripts.
+
+export const SCENE_SLOTS = [
+  "script",
+  "playerHitScript",
+  "playerHit2Script",
+  "playerHit3Script",
+] as const;
+
+export const ACTOR_SLOTS = [
+  "script",
+  "startScript",
+  "updateScript",
+  "hit1Script",
+  "hit2Script",
+  "hit3Script",
+] as const;
+
+export const TRIGGER_SLOTS = ["script", "leaveScript"] as const;
+
+export const SLOTS_BY_TARGET: Record<"scene" | "actor" | "trigger", readonly string[]> = {
+  scene: SCENE_SLOTS,
+  actor: ACTOR_SLOTS,
+  trigger: TRIGGER_SLOTS,
+};
+
+export type AnyEntity = GBSScene | GBSActor | GBSTrigger;
+export type EntityKind = "scene" | "actor" | "trigger";
+
+export function getSlot(entity: AnyEntity, slot: string): GBSEvent[] {
+  return ((entity as GBSSlottable)[slot] as GBSEvent[] | undefined) ?? [];
+}
+
+export function setSlot(entity: AnyEntity, slot: string, events: GBSEvent[]): void {
+  (entity as GBSSlottable)[slot] = events;
+}
+
+// --- Resolución de entidades ---
 
 export function resolveScene(
   project: GBSProject,
@@ -36,6 +77,37 @@ export function resolveTrigger(
   });
 }
 
+// Resuelve una entidad (scene/actor/trigger) a partir de los args estándar de un tool.
+// Devuelve la entidad y su escena, o un mensaje de error.
+export function resolveTarget(
+  project: GBSProject,
+  target: EntityKind,
+  sceneId?: string,
+  sceneName?: string,
+  entityId?: string,
+  entityName?: string
+): { entity: AnyEntity; scene: GBSScene } | string {
+  if (!sceneId && !sceneName) return "Debes proporcionar sceneId o sceneName";
+  const scene = resolveScene(project, sceneId, sceneName);
+  if (!scene) return `Escena no encontrada: ${sceneId ?? sceneName}`;
+
+  if (target === "scene") return { entity: scene, scene };
+
+  if (target === "actor") {
+    if (!entityId && !entityName) return "Debes proporcionar entityId o entityName para target=actor";
+    const actor = resolveActor(scene, entityId, entityName);
+    if (!actor) return `Actor no encontrado: ${entityId ?? entityName}`;
+    return { entity: actor, scene };
+  }
+
+  if (!entityId && !entityName) return "Debes proporcionar entityId o entityName para target=trigger";
+  const trigger = resolveTrigger(scene, entityId, entityName);
+  if (!trigger) return `Trigger no encontrado: ${entityId ?? entityName}`;
+  return { entity: trigger, scene };
+}
+
+// --- Utilidades varias ---
+
 export function toSymbol(name: string): string {
   return (
     name
@@ -46,6 +118,24 @@ export function toSymbol(name: string): string {
       .replace(/^_+|_+$/g, "")
       .substring(0, 64) || "unnamed"
   );
+}
+
+// Construye mapas id→name para escenas, actores y triggers en una sola pasada.
+// Reutilizado por los tools de análisis.
+export function buildEntityMaps(project: GBSProject): {
+  scenes: Map<string, string>;
+  actors: Map<string, string>;
+  triggers: Map<string, string>;
+} {
+  const scenes = new Map<string, string>();
+  const actors = new Map<string, string>();
+  const triggers = new Map<string, string>();
+  for (const scene of project.scenes) {
+    scenes.set(scene.id, scene.name);
+    for (const a of scene.actors) actors.set(a.id, a.name);
+    for (const t of scene.triggers) triggers.set(t.id, t.name);
+  }
+  return { scenes, actors, triggers };
 }
 
 // --- Helpers recursivos para eventos ---
@@ -104,6 +194,83 @@ export function updateEventArgs(
   return { events: result, updated };
 }
 
+// Localiza el slot donde vive un evento en todo el proyecto.
+// Devuelve null si no existe. Reemplaza los dobles bucles "outer:" duplicados.
+export type EventLocation = {
+  scene: GBSScene;
+  entity: AnyEntity;
+  entityKind: EntityKind;
+  slot: string;
+  events: GBSEvent[];
+  describe: string;
+};
+
+export function findEventLocation(
+  project: GBSProject,
+  eventId: string
+): EventLocation | null {
+  const containsEventId = (events: GBSEvent[]): boolean => {
+    for (const e of events) {
+      if (e.id === eventId) return true;
+      if (e.children) {
+        for (const childEvts of Object.values(e.children)) {
+          if (containsEventId(childEvts)) return true;
+        }
+      }
+    }
+    return false;
+  };
+
+  for (const scene of project.scenes) {
+    for (const slot of SCENE_SLOTS) {
+      const events = getSlot(scene, slot);
+      if (containsEventId(events)) {
+        return {
+          scene,
+          entity: scene,
+          entityKind: "scene",
+          slot,
+          events,
+          describe: `escena "${scene.name}" › ${slot}`,
+        };
+      }
+    }
+    for (const actor of scene.actors) {
+      for (const slot of ACTOR_SLOTS) {
+        const events = getSlot(actor, slot);
+        if (containsEventId(events)) {
+          return {
+            scene,
+            entity: actor,
+            entityKind: "actor",
+            slot,
+            events,
+            describe: `actor "${actor.name}" (escena "${scene.name}") › ${slot}`,
+          };
+        }
+      }
+    }
+    for (const trigger of scene.triggers) {
+      for (const slot of TRIGGER_SLOTS) {
+        const events = getSlot(trigger, slot);
+        if (containsEventId(events)) {
+          return {
+            scene,
+            entity: trigger,
+            entityKind: "trigger",
+            slot,
+            events,
+            describe: `trigger "${trigger.name}" (escena "${scene.name}") › ${slot}`,
+          };
+        }
+      }
+    }
+  }
+  return null;
+}
+
+// --- Walk de eventos del proyecto ---
+
 type EventCtx = { sceneId: string; entityId?: string; slot: string };
 
 function walkEvents(
@@ -125,26 +292,29 @@ export function walkProjectEvents(
   project: GBSProject,
   cb: (evt: GBSEvent, ctx: EventCtx) => void
 ): void {
-  const sceneSlots = ["script", "playerHitScript", "playerHit2Script", "playerHit3Script"];
-  const actorSlots = ["script", "startScript", "updateScript", "hit1Script", "hit2Script", "hit3Script"];
-  const triggerSlots = ["script", "leaveScript"];
-
   for (const scene of project.scenes) {
-    for (const slot of sceneSlots) {
-      const evts = (scene as GBSSlottable)[slot] as GBSEvent[] | undefined;
-      walkEvents(evts ?? [], cb, { sceneId: scene.id, slot });
+    for (const slot of SCENE_SLOTS) {
+      walkEvents(getSlot(scene, slot), cb, { sceneId: scene.id, slot });
     }
     for (const actor of scene.actors) {
-      for (const slot of actorSlots) {
-        const evts = (actor as GBSSlottable)[slot] as GBSEvent[] | undefined;
-        walkEvents(evts ?? [], cb, { sceneId: scene.id, entityId: actor.id, slot });
+      for (const slot of ACTOR_SLOTS) {
+        walkEvents(getSlot(actor, slot), cb, { sceneId: scene.id, entityId: actor.id, slot });
       }
     }
     for (const trigger of scene.triggers) {
-      for (const slot of triggerSlots) {
-        const evts = (trigger as GBSSlottable)[slot] as GBSEvent[] | undefined;
-        walkEvents(evts ?? [], cb, { sceneId: scene.id, entityId: trigger.id, slot });
+      for (const slot of TRIGGER_SLOTS) {
+        walkEvents(getSlot(trigger, slot), cb, { sceneId: scene.id, entityId: trigger.id, slot });
       }
     }
   }
+}
+
+// --- Patrón load → mutar → save ---
+// Encapsula el ciclo completo. La función mutator puede devolver datos para incluir
+// en la respuesta del tool. Si lanza, no se guarda.
+export function withProject<T>(projectPath: string, mutator: (p: GBSProject) => T): T {
+  const project = loadProject(projectPath);
+  const result = mutator(project);
+  saveProject(projectPath, project);
+  return result;
 }

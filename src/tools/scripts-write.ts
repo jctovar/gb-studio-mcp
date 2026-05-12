@@ -1,66 +1,33 @@
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { loadProject, saveProject } from "../lib/gbsproj-parser.js";
-import { resolveScene, resolveActor, resolveTrigger, removeEventById, updateEventArgs } from "../lib/project-helpers.js";
-import type { GBSScene, GBSActor, GBSTrigger, GBSEvent, GBSSlottable } from "../types/gbstudio.js";
+import {
+  resolveTarget,
+  removeEventById,
+  updateEventArgs,
+  findEventLocation,
+  getSlot,
+  setSlot,
+  withProject,
+  SLOTS_BY_TARGET,
+  type EntityKind,
+} from "../lib/project-helpers.js";
+import { ok, err, handler } from "../lib/mcp-response.js";
+import type { GBSEvent } from "../types/gbstudio.js";
 
 const SCRIPT_TARGETS = ["scene", "actor", "trigger"] as const;
+const DIRECTIONS = ["up", "down", "left", "right"] as const;
+type Direction = (typeof DIRECTIONS)[number];
 
-const VALID_SLOTS: Record<string, readonly string[]> = {
-  scene: ["script", "playerHitScript", "playerHit2Script", "playerHit3Script"],
-  actor: ["script", "startScript", "updateScript", "hit1Script", "hit2Script", "hit3Script"],
-  trigger: ["script", "leaveScript"],
+type TargetArgs = {
+  projectPath: string;
+  target: EntityKind;
+  sceneId?: string;
+  sceneName?: string;
+  entityId?: string;
+  entityName?: string;
+  slot?: string;
 };
-
-const SCENE_SLOTS = ["script", "playerHitScript", "playerHit2Script", "playerHit3Script"];
-const ACTOR_SLOTS = ["script", "startScript", "updateScript", "hit1Script", "hit2Script", "hit3Script"];
-const TRIGGER_SLOTS = ["script", "leaveScript"];
-
-type AnyEntity = GBSScene | GBSActor | GBSTrigger;
-
-function getSlot(entity: AnyEntity, slot: string): GBSEvent[] {
-  return ((entity as GBSSlottable)[slot] as GBSEvent[] | undefined) ?? [];
-}
-
-function setSlot(entity: AnyEntity, slot: string, events: GBSEvent[]): void {
-  (entity as GBSSlottable)[slot] = events;
-}
-
-const ok = (data: unknown) => ({
-  content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
-});
-const err = (msg: string) => ({
-  content: [{ type: "text" as const, text: `Error: ${msg}` }],
-  isError: true as const,
-});
-
-function resolveTarget(
-  project: ReturnType<typeof loadProject>,
-  target: "scene" | "actor" | "trigger",
-  sceneId?: string,
-  sceneName?: string,
-  entityId?: string,
-  entityName?: string
-): { entity: AnyEntity; scene: GBSScene } | string {
-  if (!sceneId && !sceneName) return "Debes proporcionar sceneId o sceneName";
-  const scene = resolveScene(project, sceneId, sceneName);
-  if (!scene) return `Escena no encontrada: ${sceneId ?? sceneName}`;
-
-  if (target === "scene") return { entity: scene, scene };
-
-  if (target === "actor") {
-    if (!entityId && !entityName) return "Debes proporcionar entityId o entityName para target=actor";
-    const actor = resolveActor(scene, entityId, entityName);
-    if (!actor) return `Actor no encontrado: ${entityId ?? entityName}`;
-    return { entity: actor, scene };
-  }
-
-  if (!entityId && !entityName) return "Debes proporcionar entityId o entityName para target=trigger";
-  const trigger = resolveTrigger(scene, entityId, entityName);
-  if (!trigger) return `Trigger no encontrado: ${entityId ?? entityName}`;
-  return { entity: trigger, scene };
-}
 
 export function registerScriptWriteTools(server: McpServer): void {
   server.registerTool(
@@ -79,27 +46,32 @@ export function registerScriptWriteTools(server: McpServer): void {
         target: z.enum(SCRIPT_TARGETS).describe("Tipo de entidad: scene, actor o trigger"),
         sceneId: z.string().optional(),
         sceneName: z.string().optional(),
-        entityId: z.string().optional().describe("ID del actor o trigger (para target=actor/trigger)"),
+        entityId: z.string().optional().describe("ID del actor o trigger"),
         entityName: z.string().optional().describe("Nombre del actor o trigger (búsqueda parcial)"),
         slot: z.string().optional().describe("Slot del script (defecto: script)"),
         command: z.string().describe("Nombre del comando GB Studio"),
-        args: z.record(z.string(), z.unknown()).optional().describe("Argumentos del evento como objeto JSON"),
+        args: z.record(z.string(), z.unknown()).optional().describe("Argumentos del evento"),
         index: z.number().int().optional().describe("Posición donde insertar (defecto: al final)"),
       },
     },
-    async ({ projectPath, target, sceneId, sceneName, entityId, entityName, slot, command, args, index }) => {
-      try {
-        const project = loadProject(projectPath);
+    handler(async (input: TargetArgs & {
+      command: string;
+      args?: Record<string, unknown>;
+      index?: number;
+    }) => {
+      const { projectPath, target, sceneId, sceneName, entityId, entityName, slot, command, args, index } = input;
+      const newEvent: GBSEvent = { id: randomUUID(), command, args: args ?? {} };
+      const result = withProject(projectPath, (project): { kind: "err"; msg: string } | { kind: "ok"; slot: string; total: number } => {
         const resolved = resolveTarget(project, target, sceneId, sceneName, entityId, entityName);
-        if (typeof resolved === "string") return err(resolved);
+        if (typeof resolved === "string") return { kind: "err", msg: resolved };
 
-        const { entity } = resolved;
         const resolvedSlot = slot ?? "script";
-        if (!VALID_SLOTS[target].includes(resolvedSlot)) {
-          return err(`Slot inválido para ${target}: "${resolvedSlot}". Válidos: ${VALID_SLOTS[target].join(", ")}`);
+        const validSlots = SLOTS_BY_TARGET[target];
+        if (!validSlots.includes(resolvedSlot)) {
+          return { kind: "err", msg: `Slot inválido para ${target}: "${resolvedSlot}". Válidos: ${validSlots.join(", ")}` };
         }
 
-        const newEvent: GBSEvent = { id: randomUUID(), command, args: args ?? {} };
+        const { entity } = resolved;
         const events = [...getSlot(entity, resolvedSlot)];
         if (index !== undefined && index >= 0 && index < events.length) {
           events.splice(index, 0, newEvent);
@@ -107,12 +79,11 @@ export function registerScriptWriteTools(server: McpServer): void {
           events.push(newEvent);
         }
         setSlot(entity, resolvedSlot, events);
-        saveProject(projectPath, project);
-        return ok({ created: true, event: newEvent, slot: resolvedSlot, totalEvents: events.length });
-      } catch (e) {
-        return err(String(e));
-      }
-    }
+        return { kind: "ok", slot: resolvedSlot, total: events.length };
+      });
+      if (result.kind === "err") return err(result.msg);
+      return ok({ created: true, event: newEvent, slot: result.slot, totalEvents: result.total });
+    })
   );
 
   server.registerTool(
@@ -125,53 +96,17 @@ export function registerScriptWriteTools(server: McpServer): void {
         eventId: z.string().describe("ID del evento a eliminar"),
       },
     },
-    async ({ projectPath, eventId }) => {
-      try {
-        const project = loadProject(projectPath);
-        let removed = false;
-        let foundIn: string | null = null;
-
-        outer: for (const scene of project.scenes) {
-          for (const slot of SCENE_SLOTS) {
-            const r = removeEventById(getSlot(scene, slot), eventId);
-            if (r.removed) {
-              setSlot(scene, slot, r.events);
-              removed = true;
-              foundIn = `escena "${scene.name}" › ${slot}`;
-              break outer;
-            }
-          }
-          for (const actor of scene.actors) {
-            for (const slot of ACTOR_SLOTS) {
-              const r = removeEventById(getSlot(actor, slot), eventId);
-              if (r.removed) {
-                setSlot(actor, slot, r.events);
-                removed = true;
-                foundIn = `actor "${actor.name}" (escena "${scene.name}") › ${slot}`;
-                break outer;
-              }
-            }
-          }
-          for (const trigger of scene.triggers) {
-            for (const slot of TRIGGER_SLOTS) {
-              const r = removeEventById(getSlot(trigger, slot), eventId);
-              if (r.removed) {
-                setSlot(trigger, slot, r.events);
-                removed = true;
-                foundIn = `trigger "${trigger.name}" (escena "${scene.name}") › ${slot}`;
-                break outer;
-              }
-            }
-          }
-        }
-
-        if (!removed) return err(`Evento no encontrado en el proyecto: ${eventId}`);
-        saveProject(projectPath, project);
-        return ok({ deleted: true, eventId, foundIn });
-      } catch (e) {
-        return err(String(e));
-      }
-    }
+    handler(async ({ projectPath, eventId }: { projectPath: string; eventId: string }) => {
+      const result = withProject(projectPath, (project) => {
+        const loc = findEventLocation(project, eventId);
+        if (!loc) return null;
+        const r = removeEventById(getSlot(loc.entity, loc.slot), eventId);
+        setSlot(loc.entity, loc.slot, r.events);
+        return loc.describe;
+      });
+      if (!result) return err(`Evento no encontrado en el proyecto: ${eventId}`);
+      return ok({ deleted: true, eventId, foundIn: result });
+    })
   );
 
   server.registerTool(
@@ -185,53 +120,17 @@ export function registerScriptWriteTools(server: McpServer): void {
         args: z.record(z.string(), z.unknown()).describe("Nuevos args a fusionar con los existentes"),
       },
     },
-    async ({ projectPath, eventId, args }) => {
-      try {
-        const project = loadProject(projectPath);
-        let updated = false;
-        let foundIn: string | null = null;
-
-        outer: for (const scene of project.scenes) {
-          for (const slot of SCENE_SLOTS) {
-            const r = updateEventArgs(getSlot(scene, slot), eventId, args);
-            if (r.updated) {
-              setSlot(scene, slot, r.events);
-              updated = true;
-              foundIn = `escena "${scene.name}" › ${slot}`;
-              break outer;
-            }
-          }
-          for (const actor of scene.actors) {
-            for (const slot of ACTOR_SLOTS) {
-              const r = updateEventArgs(getSlot(actor, slot), eventId, args);
-              if (r.updated) {
-                setSlot(actor, slot, r.events);
-                updated = true;
-                foundIn = `actor "${actor.name}" (escena "${scene.name}") › ${slot}`;
-                break outer;
-              }
-            }
-          }
-          for (const trigger of scene.triggers) {
-            for (const slot of TRIGGER_SLOTS) {
-              const r = updateEventArgs(getSlot(trigger, slot), eventId, args);
-              if (r.updated) {
-                setSlot(trigger, slot, r.events);
-                updated = true;
-                foundIn = `trigger "${trigger.name}" (escena "${scene.name}") › ${slot}`;
-                break outer;
-              }
-            }
-          }
-        }
-
-        if (!updated) return err(`Evento no encontrado en el proyecto: ${eventId}`);
-        saveProject(projectPath, project);
-        return ok({ updated: true, eventId, foundIn, mergedArgs: args });
-      } catch (e) {
-        return err(String(e));
-      }
-    }
+    handler(async ({ projectPath, eventId, args }: { projectPath: string; eventId: string; args: Record<string, unknown> }) => {
+      const result = withProject(projectPath, (project) => {
+        const loc = findEventLocation(project, eventId);
+        if (!loc) return null;
+        const r = updateEventArgs(getSlot(loc.entity, loc.slot), eventId, args);
+        setSlot(loc.entity, loc.slot, r.events);
+        return loc.describe;
+      });
+      if (!result) return err(`Evento no encontrado en el proyecto: ${eventId}`);
+      return ok({ updated: true, eventId, foundIn: result, mergedArgs: args });
+    })
   );
 
   server.registerTool(
@@ -250,22 +149,19 @@ export function registerScriptWriteTools(server: McpServer): void {
         text: z.string().describe("Texto del diálogo"),
       },
     },
-    async ({ projectPath, target, sceneId, sceneName, entityId, entityName, slot, text }) => {
-      try {
-        const project = loadProject(projectPath);
+    handler(async (input: TargetArgs & { text: string }) => {
+      const { projectPath, target, sceneId, sceneName, entityId, entityName, slot, text } = input;
+      const newEvent: GBSEvent = { id: randomUUID(), command: "EVENT_TEXT", args: { text: [text] } };
+      const result = withProject(projectPath, (project): { kind: "err"; msg: string } | { kind: "ok"; slot: string } => {
         const resolved = resolveTarget(project, target, sceneId, sceneName, entityId, entityName);
-        if (typeof resolved === "string") return err(resolved);
-
-        const { entity } = resolved;
+        if (typeof resolved === "string") return { kind: "err", msg: resolved };
         const resolvedSlot = slot ?? "script";
-        const newEvent: GBSEvent = { id: randomUUID(), command: "EVENT_TEXT", args: { text: [text] } };
-        setSlot(entity, resolvedSlot, [...getSlot(entity, resolvedSlot), newEvent]);
-        saveProject(projectPath, project);
-        return ok({ created: true, event: newEvent, slot: resolvedSlot });
-      } catch (e) {
-        return err(String(e));
-      }
-    }
+        setSlot(resolved.entity, resolvedSlot, [...getSlot(resolved.entity, resolvedSlot), newEvent]);
+        return { kind: "ok", slot: resolvedSlot };
+      });
+      if (result.kind === "err") return err(result.msg);
+      return ok({ created: true, event: newEvent, slot: result.slot });
+    })
   );
 
   server.registerTool(
@@ -284,32 +180,35 @@ export function registerScriptWriteTools(server: McpServer): void {
         targetSceneId: z.string().describe("ID de la escena de destino"),
         targetX: z.number().int().min(0).describe("Posición X del jugador en la escena destino"),
         targetY: z.number().int().min(0).describe("Posición Y del jugador en la escena destino"),
-        direction: z.enum(["up", "down", "left", "right"]).optional().describe("Dirección al llegar (defecto: down)"),
+        direction: z.enum(DIRECTIONS).optional().describe("Dirección al llegar (defecto: down)"),
       },
     },
-    async ({ projectPath, target, sceneId, sceneName, entityId, entityName, slot, targetSceneId, targetX, targetY, direction }) => {
-      try {
-        const project = loadProject(projectPath);
+    handler(async (input: TargetArgs & {
+      targetSceneId: string;
+      targetX: number;
+      targetY: number;
+      direction?: Direction;
+    }) => {
+      const { projectPath, target, sceneId, sceneName, entityId, entityName, slot, targetSceneId, targetX, targetY, direction } = input;
+      const newEvent: GBSEvent = {
+        id: randomUUID(),
+        command: "EVENT_SWITCH_SCENE",
+        args: { sceneId: targetSceneId, x: targetX, y: targetY, direction: direction ?? "down" },
+      };
+      const result = withProject(projectPath, (project): { kind: "err"; msg: string } | { kind: "ok"; slot: string; destScene: { id: string; name: string } } => {
         const destScene = project.scenes.find((s) => s.id === targetSceneId);
-        if (!destScene) return err(`Escena destino no encontrada: ${targetSceneId}`);
+        if (!destScene) return { kind: "err", msg: `Escena destino no encontrada: ${targetSceneId}` };
 
         const resolved = resolveTarget(project, target, sceneId, sceneName, entityId, entityName);
-        if (typeof resolved === "string") return err(resolved);
+        if (typeof resolved === "string") return { kind: "err", msg: resolved };
 
-        const { entity } = resolved;
         const resolvedSlot = slot ?? "script";
-        const newEvent: GBSEvent = {
-          id: randomUUID(),
-          command: "EVENT_SWITCH_SCENE",
-          args: { sceneId: targetSceneId, x: targetX, y: targetY, direction: direction ?? "down" },
-        };
-        setSlot(entity, resolvedSlot, [...getSlot(entity, resolvedSlot), newEvent]);
-        saveProject(projectPath, project);
-        return ok({ created: true, event: newEvent, slot: resolvedSlot, targetScene: { id: destScene.id, name: destScene.name } });
-      } catch (e) {
-        return err(String(e));
-      }
-    }
+        setSlot(resolved.entity, resolvedSlot, [...getSlot(resolved.entity, resolvedSlot), newEvent]);
+        return { kind: "ok", slot: resolvedSlot, destScene: { id: destScene.id, name: destScene.name } };
+      });
+      if (result.kind === "err") return err(result.msg);
+      return ok({ created: true, event: newEvent, slot: result.slot, targetScene: result.destScene });
+    })
   );
 
   server.registerTool(
@@ -329,28 +228,26 @@ export function registerScriptWriteTools(server: McpServer): void {
         value: z.number().describe("Valor numérico a asignar"),
       },
     },
-    async ({ projectPath, target, sceneId, sceneName, entityId, entityName, slot, variableId, value }) => {
-      try {
-        const project = loadProject(projectPath);
+    handler(async (input: TargetArgs & { variableId: string; value: number }) => {
+      const { projectPath, target, sceneId, sceneName, entityId, entityName, slot, variableId, value } = input;
+      const newEvent: GBSEvent = {
+        id: randomUUID(),
+        command: "EVENT_SET_VALUE",
+        args: { variable: variableId, value },
+      };
+      const result = withProject(projectPath, (project): { kind: "err"; msg: string } | { kind: "ok"; slot: string; variable: { id: string; name: string } } => {
         const variable = project.variables.find((v) => v.id === variableId);
-        if (!variable) return err(`Variable no encontrada: ${variableId}`);
+        if (!variable) return { kind: "err", msg: `Variable no encontrada: ${variableId}` };
 
         const resolved = resolveTarget(project, target, sceneId, sceneName, entityId, entityName);
-        if (typeof resolved === "string") return err(resolved);
+        if (typeof resolved === "string") return { kind: "err", msg: resolved };
 
-        const { entity } = resolved;
         const resolvedSlot = slot ?? "script";
-        const newEvent: GBSEvent = {
-          id: randomUUID(),
-          command: "EVENT_SET_VALUE",
-          args: { variable: variableId, value },
-        };
-        setSlot(entity, resolvedSlot, [...getSlot(entity, resolvedSlot), newEvent]);
-        saveProject(projectPath, project);
-        return ok({ created: true, event: newEvent, slot: resolvedSlot, variable: { id: variable.id, name: variable.name } });
-      } catch (e) {
-        return err(String(e));
-      }
-    }
+        setSlot(resolved.entity, resolvedSlot, [...getSlot(resolved.entity, resolvedSlot), newEvent]);
+        return { kind: "ok", slot: resolvedSlot, variable: { id: variable.id, name: variable.name } };
+      });
+      if (result.kind === "err") return err(result.msg);
+      return ok({ created: true, event: newEvent, slot: result.slot, variable: result.variable });
+    })
   );
 }

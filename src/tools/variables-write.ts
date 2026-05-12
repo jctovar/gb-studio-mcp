@@ -1,15 +1,8 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { loadProject, saveProject } from "../lib/gbsproj-parser.js";
-import { toSymbol, walkProjectEvents } from "../lib/project-helpers.js";
-
-const ok = (data: unknown) => ({
-  content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
-});
-const err = (msg: string) => ({
-  content: [{ type: "text" as const, text: `Error: ${msg}` }],
-  isError: true as const,
-});
+import { loadProject } from "../lib/gbsproj-parser.js";
+import { toSymbol, walkProjectEvents, withProject } from "../lib/project-helpers.js";
+import { ok, err, handler } from "../lib/mcp-response.js";
 
 export function registerVariableWriteTools(server: McpServer): void {
   server.registerTool(
@@ -23,26 +16,22 @@ export function registerVariableWriteTools(server: McpServer): void {
         symbol: z.string().optional().describe("Símbolo de compilación (se genera automáticamente si no se especifica)"),
       },
     },
-    async ({ projectPath, name, symbol }) => {
-      try {
-        const project = loadProject(projectPath);
-
+    handler(async ({ projectPath, name, symbol }: { projectPath: string; name: string; symbol?: string }) => {
+      const newVar = withProject(projectPath, (project) => {
         const maxId = project.variables.reduce(
           (max, v) => Math.max(max, parseInt(v.id, 10) || 0),
           -1
         );
-        const newVar = {
+        const v = {
           id: String(maxId + 1),
           name,
           symbol: symbol ?? `var_${toSymbol(name)}`,
         };
-        project.variables.push(newVar);
-        saveProject(projectPath, project);
-        return ok({ created: true, variable: newVar });
-      } catch (e) {
-        return err(String(e));
-      }
-    }
+        project.variables.push(v);
+        return v;
+      });
+      return ok({ created: true, variable: newVar });
+    })
   );
 
   server.registerTool(
@@ -58,26 +47,25 @@ export function registerVariableWriteTools(server: McpServer): void {
         newSymbol: z.string().optional().describe("Nuevo símbolo (se genera automáticamente si no se especifica)"),
       },
     },
-    async ({ projectPath, variableId, variableName, newName, newSymbol }) => {
-      try {
-        if (!variableId && !variableName) return err("Debes proporcionar variableId o variableName");
-        const project = loadProject(projectPath);
-
+    handler(async ({ projectPath, variableId, variableName, newName, newSymbol }: {
+      projectPath: string; variableId?: string; variableName?: string;
+      newName: string; newSymbol?: string;
+    }) => {
+      if (!variableId && !variableName) return err("Debes proporcionar variableId o variableName");
+      const result = withProject(projectPath, (project): { kind: "err" } | { kind: "ok"; variable: { id: string; name: string; symbol: string }; oldName: string } => {
         const variable = project.variables.find((v) => {
           if (variableId) return v.id === variableId;
           return v.name.toLowerCase().includes(variableName!.toLowerCase());
         });
-        if (!variable) return err(`Variable no encontrada: ${variableId ?? variableName}`);
-
+        if (!variable) return { kind: "err" };
         const oldName = variable.name;
         variable.name = newName;
         variable.symbol = newSymbol ?? `var_${toSymbol(newName)}`;
-        saveProject(projectPath, project);
-        return ok({ updated: true, variable, oldName });
-      } catch (e) {
-        return err(String(e));
-      }
-    }
+        return { kind: "ok", variable: { id: variable.id, name: variable.name, symbol: variable.symbol }, oldName };
+      });
+      if (result.kind === "err") return err(`Variable no encontrada: ${variableId ?? variableName}`);
+      return ok({ updated: true, variable: result.variable, oldName: result.oldName });
+    })
   );
 
   server.registerTool(
@@ -91,43 +79,40 @@ export function registerVariableWriteTools(server: McpServer): void {
         variableName: z.string().optional().describe("Nombre de la variable (búsqueda parcial)"),
       },
     },
-    async ({ projectPath, variableId, variableName }) => {
-      try {
-        if (!variableId && !variableName) return err("Debes proporcionar variableId o variableName");
-        const project = loadProject(projectPath);
+    handler(async ({ projectPath, variableId, variableName }: {
+      projectPath: string; variableId?: string; variableName?: string;
+    }) => {
+      if (!variableId && !variableName) return err("Debes proporcionar variableId o variableName");
+      const project = loadProject(projectPath);
 
-        const variable = project.variables.find((v) => {
-          if (variableId) return v.id === variableId;
-          return v.name.toLowerCase().includes(variableName!.toLowerCase());
-        });
-        if (!variable) return err(`Variable no encontrada: ${variableId ?? variableName}`);
+      const variable = project.variables.find((v) => {
+        if (variableId) return v.id === variableId;
+        return v.name.toLowerCase().includes(variableName!.toLowerCase());
+      });
+      if (!variable) return err(`Variable no encontrada: ${variableId ?? variableName}`);
 
-        const usages: Array<{
-          eventId: string;
-          command: string;
-          sceneId: string;
-          entityId?: string;
-          slot: string;
-        }> = [];
+      const usages: Array<{
+        eventId: string;
+        command: string;
+        sceneId: string;
+        entityId?: string;
+        slot: string;
+      }> = [];
 
-        // Busca el ID de la variable como string JSON (ej: "0" → matches "variable":"0")
-        const searchStr = `"${variable.id}"`;
-        walkProjectEvents(project, (evt, ctx) => {
-          if (JSON.stringify(evt.args ?? {}).includes(searchStr)) {
-            usages.push({
-              eventId: evt.id,
-              command: evt.command,
-              sceneId: ctx.sceneId,
-              entityId: ctx.entityId,
-              slot: ctx.slot,
-            });
-          }
-        });
+      const searchStr = `"${variable.id}"`;
+      walkProjectEvents(project, (evt, ctx) => {
+        if (JSON.stringify(evt.args ?? {}).includes(searchStr)) {
+          usages.push({
+            eventId: evt.id,
+            command: evt.command,
+            sceneId: ctx.sceneId,
+            entityId: ctx.entityId,
+            slot: ctx.slot,
+          });
+        }
+      });
 
-        return ok({ variable, usageCount: usages.length, usages });
-      } catch (e) {
-        return err(String(e));
-      }
-    }
+      return ok({ variable, usageCount: usages.length, usages });
+    })
   );
 }

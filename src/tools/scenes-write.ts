@@ -1,20 +1,22 @@
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { loadProject, saveProject } from "../lib/gbsproj-parser.js";
-import { resolveScene, resolveActor, resolveTrigger, toSymbol } from "../lib/project-helpers.js";
+import {
+  resolveScene,
+  resolveActor,
+  resolveTrigger,
+  toSymbol,
+  withProject,
+} from "../lib/project-helpers.js";
+import { ok, err, handler } from "../lib/mcp-response.js";
 
 const SCENE_TYPES = ["topDown", "platform", "adventure", "shmup", "pointAndClick", "logo"] as const;
 const MOVEMENT_TYPES = ["playerInput", "random", "none", "static"] as const;
 const DIRECTIONS = ["up", "down", "left", "right"] as const;
 
-const ok = (data: unknown) => ({
-  content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
-});
-const err = (msg: string) => ({
-  content: [{ type: "text" as const, text: `Error: ${msg}` }],
-  isError: true as const,
-});
+type SceneType = (typeof SCENE_TYPES)[number];
+type MovementType = (typeof MOVEMENT_TYPES)[number];
+type Direction = (typeof DIRECTIONS)[number];
 
 export function registerSceneWriteTools(server: McpServer): void {
   server.registerTool(
@@ -32,10 +34,12 @@ export function registerSceneWriteTools(server: McpServer): void {
         notes: z.string().optional(),
       },
     },
-    async ({ projectPath, name, backgroundId, width, height, type, notes }) => {
-      try {
-        const project = loadProject(projectPath);
-        const id = randomUUID();
+    handler(async ({ projectPath, name, backgroundId, width, height, type, notes }: {
+      projectPath: string; name: string; backgroundId?: string;
+      width?: number; height?: number; type?: SceneType; notes?: string;
+    }) => {
+      const id = randomUUID();
+      withProject(projectPath, (project) => {
         project.scenes.push({
           id,
           name,
@@ -50,12 +54,9 @@ export function registerSceneWriteTools(server: McpServer): void {
           symbol: toSymbol(`scene_${name}`),
           notes,
         });
-        saveProject(projectPath, project);
-        return ok({ created: true, sceneId: id, name, type: type ?? "topDown" });
-      } catch (e) {
-        return err(String(e));
-      }
-    }
+      });
+      return ok({ created: true, sceneId: id, name, type: type ?? "topDown" });
+    })
   );
 
   server.registerTool(
@@ -73,22 +74,22 @@ export function registerSceneWriteTools(server: McpServer): void {
         notes: z.string().optional(),
       },
     },
-    async ({ projectPath, sceneId, sceneName, name, backgroundId, type, notes }) => {
-      try {
-        const project = loadProject(projectPath);
+    handler(async ({ projectPath, sceneId, sceneName, name, backgroundId, type, notes }: {
+      projectPath: string; sceneId?: string; sceneName?: string;
+      name?: string; backgroundId?: string; type?: SceneType; notes?: string;
+    }) => {
+      const result = withProject(projectPath, (project) => {
         const scene = resolveScene(project, sceneId, sceneName);
-        if (!scene) return err(`Escena no encontrada: ${sceneId ?? sceneName}`);
-
+        if (!scene) return null;
         if (name !== undefined) scene.name = name;
         if (backgroundId !== undefined) scene.backgroundId = backgroundId;
         if (type !== undefined) scene.type = type;
         if (notes !== undefined) scene.notes = notes;
-        saveProject(projectPath, project);
-        return ok({ updated: true, sceneId: scene.id, sceneName: scene.name });
-      } catch (e) {
-        return err(String(e));
-      }
-    }
+        return { sceneId: scene.id, sceneName: scene.name };
+      });
+      if (!result) return err(`Escena no encontrada: ${sceneId ?? sceneName}`);
+      return ok({ updated: true, ...result });
+    })
   );
 
   server.registerTool(
@@ -102,24 +103,22 @@ export function registerSceneWriteTools(server: McpServer): void {
         sceneName: z.string().optional(),
       },
     },
-    async ({ projectPath, sceneId, sceneName }) => {
-      try {
-        const project = loadProject(projectPath);
+    handler(async ({ projectPath, sceneId, sceneName }: {
+      projectPath: string; sceneId?: string; sceneName?: string;
+    }) => {
+      const result = withProject(projectPath, (project) => {
         const scene = resolveScene(project, sceneId, sceneName);
-        if (!scene) return err(`Escena no encontrada: ${sceneId ?? sceneName}`);
-
+        if (!scene) return null;
         const warnings: string[] = [];
         if (project.settings.startSceneId === scene.id) {
           warnings.push("Esta es la escena inicial (settings.startSceneId). Actualiza la configuración del proyecto.");
         }
-
         project.scenes = project.scenes.filter((s) => s.id !== scene.id);
-        saveProject(projectPath, project);
-        return ok({ deleted: true, sceneId: scene.id, sceneName: scene.name, warnings });
-      } catch (e) {
-        return err(String(e));
-      }
-    }
+        return { sceneId: scene.id, sceneName: scene.name, warnings };
+      });
+      if (!result) return err(`Escena no encontrada: ${sceneId ?? sceneName}`);
+      return ok({ deleted: true, ...result });
+    })
   );
 
   server.registerTool(
@@ -140,13 +139,15 @@ export function registerSceneWriteTools(server: McpServer): void {
         animate: z.boolean().optional().describe("Animar automáticamente (defecto: false)"),
       },
     },
-    async ({ projectPath, sceneId, sceneName, name, x, y, spriteSheetId, movementType, direction, animate }) => {
-      try {
-        const project = loadProject(projectPath);
+    handler(async ({ projectPath, sceneId, sceneName, name, x, y, spriteSheetId, movementType, direction, animate }: {
+      projectPath: string; sceneId?: string; sceneName?: string;
+      name: string; x: number; y: number; spriteSheetId?: string;
+      movementType?: MovementType; direction?: Direction; animate?: boolean;
+    }) => {
+      const id = randomUUID();
+      const result = withProject(projectPath, (project) => {
         const scene = resolveScene(project, sceneId, sceneName);
-        if (!scene) return err(`Escena no encontrada: ${sceneId ?? sceneName}`);
-
-        const id = randomUUID();
+        if (!scene) return null;
         scene.actors.push({
           id,
           name,
@@ -164,12 +165,11 @@ export function registerSceneWriteTools(server: McpServer): void {
           hit2Script: [],
           hit3Script: [],
         });
-        saveProject(projectPath, project);
-        return ok({ created: true, actorId: id, name, x, y, sceneId: scene.id, sceneName: scene.name });
-      } catch (e) {
-        return err(String(e));
-      }
-    }
+        return { sceneId: scene.id, sceneName: scene.name };
+      });
+      if (!result) return err(`Escena no encontrada: ${sceneId ?? sceneName}`);
+      return ok({ created: true, actorId: id, name, x, y, ...result });
+    })
   );
 
   server.registerTool(
@@ -192,15 +192,17 @@ export function registerSceneWriteTools(server: McpServer): void {
         animate: z.boolean().optional(),
       },
     },
-    async ({ projectPath, sceneId, sceneName, entityId, entityName, name, x, y, spriteSheetId, movementType, direction, animate }) => {
-      try {
-        const project = loadProject(projectPath);
+    handler(async ({ projectPath, sceneId, sceneName, entityId, entityName, name, x, y, spriteSheetId, movementType, direction, animate }: {
+      projectPath: string; sceneId?: string; sceneName?: string;
+      entityId?: string; entityName?: string;
+      name?: string; x?: number; y?: number; spriteSheetId?: string;
+      movementType?: MovementType; direction?: Direction; animate?: boolean;
+    }) => {
+      const result = withProject(projectPath, (project) => {
         const scene = resolveScene(project, sceneId, sceneName);
-        if (!scene) return err(`Escena no encontrada: ${sceneId ?? sceneName}`);
-
+        if (!scene) return { kind: "no-scene" as const };
         const actor = resolveActor(scene, entityId, entityName);
-        if (!actor) return err(`Actor no encontrado: ${entityId ?? entityName}`);
-
+        if (!actor) return { kind: "no-actor" as const };
         if (name !== undefined) actor.name = name;
         if (x !== undefined) actor.x = x;
         if (y !== undefined) actor.y = y;
@@ -208,12 +210,12 @@ export function registerSceneWriteTools(server: McpServer): void {
         if (movementType !== undefined) actor.movementType = movementType;
         if (direction !== undefined) actor.direction = direction;
         if (animate !== undefined) actor.animate = animate;
-        saveProject(projectPath, project);
-        return ok({ updated: true, actorId: actor.id, actorName: actor.name });
-      } catch (e) {
-        return err(String(e));
-      }
-    }
+        return { kind: "ok" as const, actorId: actor.id, actorName: actor.name };
+      });
+      if (result.kind === "no-scene") return err(`Escena no encontrada: ${sceneId ?? sceneName}`);
+      if (result.kind === "no-actor") return err(`Actor no encontrado: ${entityId ?? entityName}`);
+      return ok({ updated: true, actorId: result.actorId, actorName: result.actorName });
+    })
   );
 
   server.registerTool(
@@ -229,22 +231,22 @@ export function registerSceneWriteTools(server: McpServer): void {
         entityName: z.string().optional(),
       },
     },
-    async ({ projectPath, sceneId, sceneName, entityId, entityName }) => {
-      try {
-        const project = loadProject(projectPath);
+    handler(async ({ projectPath, sceneId, sceneName, entityId, entityName }: {
+      projectPath: string; sceneId?: string; sceneName?: string;
+      entityId?: string; entityName?: string;
+    }) => {
+      const result = withProject(projectPath, (project) => {
         const scene = resolveScene(project, sceneId, sceneName);
-        if (!scene) return err(`Escena no encontrada: ${sceneId ?? sceneName}`);
-
+        if (!scene) return { kind: "no-scene" as const };
         const actor = resolveActor(scene, entityId, entityName);
-        if (!actor) return err(`Actor no encontrado: ${entityId ?? entityName}`);
-
+        if (!actor) return { kind: "no-actor" as const };
         scene.actors = scene.actors.filter((a) => a.id !== actor.id);
-        saveProject(projectPath, project);
-        return ok({ deleted: true, actorId: actor.id, actorName: actor.name });
-      } catch (e) {
-        return err(String(e));
-      }
-    }
+        return { kind: "ok" as const, actorId: actor.id, actorName: actor.name };
+      });
+      if (result.kind === "no-scene") return err(`Escena no encontrada: ${sceneId ?? sceneName}`);
+      if (result.kind === "no-actor") return err(`Actor no encontrado: ${entityId ?? entityName}`);
+      return ok({ deleted: true, actorId: result.actorId, actorName: result.actorName });
+    })
   );
 
   server.registerTool(
@@ -263,13 +265,14 @@ export function registerSceneWriteTools(server: McpServer): void {
         height: z.number().int().min(1).optional().describe("Alto en tiles (defecto: 1)"),
       },
     },
-    async ({ projectPath, sceneId, sceneName, name, x, y, width, height }) => {
-      try {
-        const project = loadProject(projectPath);
+    handler(async ({ projectPath, sceneId, sceneName, name, x, y, width, height }: {
+      projectPath: string; sceneId?: string; sceneName?: string;
+      name: string; x: number; y: number; width?: number; height?: number;
+    }) => {
+      const id = randomUUID();
+      const result = withProject(projectPath, (project) => {
         const scene = resolveScene(project, sceneId, sceneName);
-        if (!scene) return err(`Escena no encontrada: ${sceneId ?? sceneName}`);
-
-        const id = randomUUID();
+        if (!scene) return null;
         scene.triggers.push({
           id,
           name,
@@ -281,12 +284,11 @@ export function registerSceneWriteTools(server: McpServer): void {
           script: [],
           leaveScript: [],
         });
-        saveProject(projectPath, project);
-        return ok({ created: true, triggerId: id, name, x, y, sceneId: scene.id, sceneName: scene.name });
-      } catch (e) {
-        return err(String(e));
-      }
-    }
+        return { sceneId: scene.id, sceneName: scene.name };
+      });
+      if (!result) return err(`Escena no encontrada: ${sceneId ?? sceneName}`);
+      return ok({ created: true, triggerId: id, name, x, y, ...result });
+    })
   );
 
   server.registerTool(
@@ -307,25 +309,26 @@ export function registerSceneWriteTools(server: McpServer): void {
         height: z.number().int().min(1).optional(),
       },
     },
-    async ({ projectPath, sceneId, sceneName, entityId, entityName, name, x, y, width, height }) => {
-      try {
-        const project = loadProject(projectPath);
+    handler(async ({ projectPath, sceneId, sceneName, entityId, entityName, name, x, y, width, height }: {
+      projectPath: string; sceneId?: string; sceneName?: string;
+      entityId?: string; entityName?: string;
+      name?: string; x?: number; y?: number; width?: number; height?: number;
+    }) => {
+      const result = withProject(projectPath, (project) => {
         const scene = resolveScene(project, sceneId, sceneName);
-        if (!scene) return err(`Escena no encontrada: ${sceneId ?? sceneName}`);
-
+        if (!scene) return { kind: "no-scene" as const };
         const trigger = resolveTrigger(scene, entityId, entityName);
-        if (!trigger) return err(`Trigger no encontrado: ${entityId ?? entityName}`);
-
+        if (!trigger) return { kind: "no-trigger" as const };
         if (name !== undefined) trigger.name = name;
         if (x !== undefined) trigger.x = x;
         if (y !== undefined) trigger.y = y;
         if (width !== undefined) trigger.width = width;
         if (height !== undefined) trigger.height = height;
-        saveProject(projectPath, project);
-        return ok({ updated: true, triggerId: trigger.id, triggerName: trigger.name });
-      } catch (e) {
-        return err(String(e));
-      }
-    }
+        return { kind: "ok" as const, triggerId: trigger.id, triggerName: trigger.name };
+      });
+      if (result.kind === "no-scene") return err(`Escena no encontrada: ${sceneId ?? sceneName}`);
+      if (result.kind === "no-trigger") return err(`Trigger no encontrado: ${entityId ?? entityName}`);
+      return ok({ updated: true, triggerId: result.triggerId, triggerName: result.triggerName });
+    })
   );
 }

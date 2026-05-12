@@ -4,8 +4,10 @@ import { existsSync, mkdirSync } from "node:fs";
 import { resolve, dirname, isAbsolute } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { loadProject, validateProject } from "../lib/gbsproj-parser.js";
+import { ok, err, handler } from "../lib/mcp-response.js";
 
 const BUILD_TARGETS = ["rom", "web"] as const;
+type BuildTarget = (typeof BUILD_TARGETS)[number];
 // 10 minutos — las builds de GB Studio pueden tardar bastante
 const BUILD_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -24,14 +26,6 @@ function findCli(): { path: string } | { error: string } {
     };
   }
 }
-
-const ok = (data: unknown) => ({
-  content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
-});
-const err = (msg: string) => ({
-  content: [{ type: "text" as const, text: `Error: ${msg}` }],
-  isError: true as const,
-});
 
 export function registerBuildTools(server: McpServer): void {
   server.registerTool(
@@ -55,118 +49,97 @@ export function registerBuildTools(server: McpServer): void {
           .describe("Validar el proyecto antes de compilar (defecto: true)"),
       },
     },
-    async ({ projectPath, target, outputDir, validateFirst }) => {
-      try {
-        // 1. Verificar gb-studio-cli
-        const cli = findCli();
-        if ("error" in cli) return err(cli.error);
+    handler(async ({ projectPath, target, outputDir, validateFirst }: {
+      projectPath: string; target?: BuildTarget; outputDir?: string; validateFirst?: boolean;
+    }) => {
+      // 1. Verificar gb-studio-cli
+      const cli = findCli();
+      if ("error" in cli) return err(cli.error);
 
-        // 2. Verificar que el proyecto existe
-        const resolvedProject = resolve(projectPath);
-        if (!existsSync(resolvedProject)) {
-          return err(`Proyecto no encontrado: ${resolvedProject}`);
-        }
+      // 2. Verificar que el proyecto existe
+      const resolvedProject = resolve(projectPath);
+      if (!existsSync(resolvedProject)) {
+        return err(`Proyecto no encontrado: ${resolvedProject}`);
+      }
 
-        // 3. Validación pre-build (activada por defecto)
-        if (validateFirst !== false) {
-          const project = loadProject(resolvedProject);
-          const validation = validateProject(project);
-          if (!validation.valid) {
-            return {
-              content: [
-                {
-                  type: "text" as const,
-                  text: JSON.stringify(
-                    {
-                      success: false,
-                      error: "El proyecto no pasó la validación pre-build. Corrije los errores antes de compilar.",
-                      validation,
-                    },
-                    null,
-                    2
-                  ),
-                },
-              ],
-              isError: true,
-            };
-          }
-          // Mostrar warnings pero continuar
-          if (validation.warnings.length > 0) {
-            console.error(
-              `[gb-studio-mcp] Advertencias de validación:\n${validation.warnings.map((w) => `  - ${w}`).join("\n")}`
-            );
-          }
-        }
-
-        // 4. Preparar directorio de salida
-        // Las rutas relativas se resuelven desde el directorio del proyecto, no desde cwd()
-        const buildTarget = target ?? "rom";
-        const projectDir = dirname(resolvedProject);
-        const resolvedOutput = outputDir
-          ? isAbsolute(outputDir) ? outputDir : resolve(projectDir, outputDir)
-          : resolve(projectDir, "build");
-
-        mkdirSync(resolvedOutput, { recursive: true });
-
-        // 5. Ejecutar build
-        const command = buildTarget === "rom" ? "make:rom" : "make:web";
-        console.error(
-          `[gb-studio-mcp] Iniciando build ${buildTarget.toUpperCase()}: ${cli.path} ${command} ...`
-        );
-
-        const startMs = Date.now();
-        const result = spawnSync(
-          cli.path,
-          [command, resolvedProject, resolvedOutput],
-          { encoding: "utf-8", timeout: BUILD_TIMEOUT_MS }
-        );
-        const elapsedSec = ((Date.now() - startMs) / 1000).toFixed(1);
-
-        // Error de spawn (CLI no ejecutable, timeout, etc.)
-        if (result.error) {
-          const isTimeout = result.error.message.includes("ETIMEDOUT") || result.error.message.includes("timeout");
-          return err(
-            isTimeout
-              ? `Build superó el timeout de ${BUILD_TIMEOUT_MS / 60000} minutos`
-              : `Error al ejecutar gb-studio-cli: ${result.error.message}`
-          );
-        }
-
-        // Error de build (exit code ≠ 0)
-        if (result.status !== 0) {
+      // 3. Validación pre-build (activada por defecto)
+      if (validateFirst !== false) {
+        const project = loadProject(resolvedProject);
+        const validation = validateProject(project);
+        if (!validation.valid) {
           return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify(
-                  {
-                    success: false,
-                    exitCode: result.status,
-                    elapsedSeconds: Number(elapsedSec),
-                    stdout: result.stdout?.trim() || null,
-                    stderr: result.stderr?.trim() || null,
-                  },
-                  null,
-                  2
-                ),
-              },
-            ],
+            content: [{
+              type: "text" as const,
+              text: JSON.stringify({
+                success: false,
+                error: "El proyecto no pasó la validación pre-build. Corrije los errores antes de compilar.",
+                validation,
+              }, null, 2),
+            }],
             isError: true,
           };
         }
-
-        // Build exitosa
-        return ok({
-          success: true,
-          target: buildTarget,
-          outputDir: resolvedOutput,
-          elapsedSeconds: Number(elapsedSec),
-          stdout: result.stdout?.trim() || null,
-        });
-      } catch (e) {
-        return err(String(e));
+        if (validation.warnings.length > 0) {
+          console.error(
+            `[gb-studio-mcp] Advertencias de validación:\n${validation.warnings.map((w) => `  - ${w}`).join("\n")}`
+          );
+        }
       }
-    }
+
+      // 4. Preparar directorio de salida — rutas relativas se anclan al directorio del proyecto
+      const buildTarget = target ?? "rom";
+      const projectDir = dirname(resolvedProject);
+      const resolvedOutput = outputDir
+        ? isAbsolute(outputDir) ? outputDir : resolve(projectDir, outputDir)
+        : resolve(projectDir, "build");
+
+      mkdirSync(resolvedOutput, { recursive: true });
+
+      // 5. Ejecutar build
+      const command = buildTarget === "rom" ? "make:rom" : "make:web";
+      console.error(`[gb-studio-mcp] Iniciando build ${buildTarget.toUpperCase()}: ${cli.path} ${command} ...`);
+
+      const startMs = Date.now();
+      const result = spawnSync(
+        cli.path,
+        [command, resolvedProject, resolvedOutput],
+        { encoding: "utf-8", timeout: BUILD_TIMEOUT_MS }
+      );
+      const elapsedSec = ((Date.now() - startMs) / 1000).toFixed(1);
+
+      if (result.error) {
+        const isTimeout = result.error.message.includes("ETIMEDOUT") || result.error.message.includes("timeout");
+        return err(
+          isTimeout
+            ? `Build superó el timeout de ${BUILD_TIMEOUT_MS / 60000} minutos`
+            : `Error al ejecutar gb-studio-cli: ${result.error.message}`
+        );
+      }
+
+      if (result.status !== 0) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({
+              success: false,
+              exitCode: result.status,
+              elapsedSeconds: Number(elapsedSec),
+              stdout: result.stdout?.trim() || null,
+              stderr: result.stderr?.trim() || null,
+            }, null, 2),
+          }],
+          isError: true,
+        };
+      }
+
+      return ok({
+        success: true,
+        target: buildTarget,
+        outputDir: resolvedOutput,
+        elapsedSeconds: Number(elapsedSec),
+        stdout: result.stdout?.trim() || null,
+      });
+    })
   );
 
   server.registerTool(
@@ -182,7 +155,7 @@ export function registerBuildTools(server: McpServer): void {
           .describe("Ruta al proyecto para validarlo también (opcional)"),
       },
     },
-    async ({ projectPath }) => {
+    handler(async ({ projectPath }: { projectPath?: string }) => {
       const info: Record<string, unknown> = {};
 
       // Node.js
@@ -225,6 +198,6 @@ export function registerBuildTools(server: McpServer): void {
       }
 
       return ok(info);
-    }
+    })
   );
 }
